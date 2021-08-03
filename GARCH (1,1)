@@ -1,0 +1,90 @@
+library(arrow)
+library(dplyr)
+library(MLmetrics)
+library(mgcv)
+library(data.table)
+library(rugarch)
+library(naniar)
+library(progress)
+library(ggplot2)
+
+train <- read.csv('....
+test <- read.csv('.....
+
+book_train1$wap <- (book_train1$bid_price1 * book_train1$ask_size1 +
+                     book_train1$ask_price1 * book_train1$bid_size1) /
+  (book_train1$bid_size1 + book_train1$ask_size1)
+
+book_train1$log_returns <- log(book_train1$wap/lag(book_train1$wap))
+
+realised_book <- book_train1[book_train1$time_id == 5,]
+realised_vol <-  sqrt(sum(realised_book$log_returns^2, na.rm = TRUE))
+cat("Realised Volatility = ", realised_vol)
+
+path <- '..'
+train_final <- NULL
+stocks <- unique(train$stock_id)
+
+for(i in 1:length(stocks)){
+    book_download <- list.files(paste0(path,'book_train.parquet/stock_id=',
+                                stocks[i],'/'), full.names = TRUE)
+    book_all <- data.table(read_parquet(book_download))
+    y <- book_all[, lapply(.SD, median), .SDcols = c(5,6,9,10), by=time_id]
+    x <- book_all[, sqrt(sum(diff(log((bid_price1*ask_size1+
+                                      ask_price1*bid_size1) /
+                                     (ask_size1+bid_size1)))^2)), by=time_id]
+    colnames(x)[ncol(x)] <- 'volatility'
+    x <- cbind(x, y[,-1])
+    x[,':='(stockID = stocks[i])]
+    train_final <- rbind(train_final, x)
+}
+
+train_final$target <- train$target
+head(train_final)
+
+book_test1$volatility <- sqrt(sum(diff(log((book_test1$bid_price1*book_test1$ask_size1+
+                                      book_test1$ask_price1*book_test1$bid_size1) /
+                                     (book_test1$ask_size1+book_test1$bid_size1)))^2))
+book_test1
+
+test_final <- data.frame(book_test1$time_id, book_test1$volatility, book_test1$bid_price2, book_test1$ask_price2,
+                         book_test1$bid_size2, book_test1$ask_size2)
+names(test_final) <- c("time_id", "volatility", "bid_price2", "ask_price2", "bid_size2",
+                       "ask_size2")
+test_final
+
+maxs <- apply(train_final[,1:7], 2, max) 
+mins <- apply(train_final[,1:7], 2, min)
+
+scaled <- as.data.frame(scale(train_final[,1:7], center=mins, scale=maxs - mins))
+scaled$target <- train_final$target
+
+train_final <- scaled
+head(train_final)
+
+index <- sample(1:nrow(train_final),round(0.75*nrow(train_final)))
+train_ <- scaled[index,]
+test_ <- scaled[-index,]
+
+set.seed(123)
+cluster <- makePSOCKcluster(15)
+spec <- ugarchspec()
+nrow(expand.grid(GARCH = 1:14, VEX = 0:1, VT = 0:1, Mean = 0:1,
+                 ARCHM = 0:2, ARFIMA = 0:1, MEX = 0:1, DISTR = 1:10))
+
+spec <- ugarchspec(variance.model = list(model = 'eGARCH', garchOrder = c(1, 1)),
+                   distribution = 'std')
+fit <- ugarchfit(spec, train_$target, solver = 'hybrid')
+spec <- getspec(fit)
+
+# GARCH(1,1) Forecast
+forc1 <- ugarchforecast(fit, data = test_, n.ahead = 3)
+U <- uncvariance(fit)^0.5
+pred_GARCH <- forc1@forecast$seriesFor
+
+rownames(pred_GARCH) <- NULL
+pred_GARCH
+coef(fit)
+
+RMSPE(test_$target[1:3], pred_GARCH)
+
